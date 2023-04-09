@@ -1,0 +1,114 @@
+
+name: CDK Deploy to prod backup region
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Log level'
+        required: true
+        default: 'warning'
+      tags:
+        description: 'Test scenario tags'
+concurrency: prod_environment
+
+jobs:
+  cdk-deploy-prod-dr:
+
+    runs-on: [self-hosted, prod]
+
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run flake8
+        run: |
+          pip install flake8
+          flake8
+
+      - name: Update dependencies
+        env:
+          SUPER_SECRET: ${{ secrets.workflow_private_key }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          AWS_DEFAULT_REGION: eu-north-1
+        run: |
+          echo "adding authorized SSH key to enable cloning private repos"
+          echo "$SUPER_SECRET" > $HOME/test.key
+          chmod 600 $HOME/test.key
+          echo "https://unix.stackexchange.com/questions/351725/why-eval-the-output-of-ssh-agent"
+          eval `ssh-agent -s`
+          ssh-add $HOME/test.key
+          export AWS_DEFAULT_REGION=eu-north-1
+          aws codeartifact login --tool pip --repository devocean-repo --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }}
+          export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }} --query authorizationToken --output text`
+          curl -sSL https://install.python-poetry.org | python -
+          $HOME/.local/bin/poetry config repositories.devocean-repo https://devocean-domain-${{ secrets.AWS_ACCOUNT_PROD }}.d.codeartifact.eu-north-1.amazonaws.com/pypi/devocean-repo/simple/
+          $HOME/.local/bin/poetry config http-basic.devocean-repo aws $CODEARTIFACT_AUTH_TOKEN
+
+      - name: Add SSH key for cloning private repos
+        env:
+          SUPER_SECRET: ${{ secrets.workflow_private_key }}
+        run: |
+          mkdir -p $HOME/.ssh
+          echo "$SUPER_SECRET" > $HOME/.ssh/id_rsa
+          chmod 600 $HOME/.ssh/id_rsa
+          eval `ssh-agent -s`
+          ssh-add $HOME/.ssh/id_rsa
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+
+      - name: CDK Deploy DR
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          AWS_DEFAULT_REGION: eu-west-3
+          AWS_ACCOUNT: ${{ secrets.AWS_ACCOUNT_PROD }}
+        run: |
+          export SSH_AUTH_SOCK=${{ env.SSH_AUTH_SOCK }}
+          export SSH_AGENT_PID=${{ env.SSH_AGENT_PID }}
+          export AWS_DEFAULT_REGION=eu-north-1
+          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          export AWS_CODEARTIFACT_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          export AWS_CODEARTIFACT_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws codeartifact login --tool pip --repository devocean-repo --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }}
+          export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }} --query authorizationToken --output text`
+          $HOME/.local/bin/poetry config repositories.devocean-repo https://devocean-domain-${{ secrets.AWS_ACCOUNT_PROD }}.d.codeartifact.eu-north-1.amazonaws.com/pypi/devocean-repo/simple/
+          $HOME/.local/bin/poetry config http-basic.devocean-repo aws $CODEARTIFACT_AUTH_TOKEN
+          sed -i -e 's/868523441767/540187191005/g' pyproject.toml
+          $HOME/.local/bin/poetry install
+          export AWS_DEFAULT_REGION=eu-west-3
+          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          export AWS_CODEARTIFACT_ACCOUNT=${{ secrets.AWS_ACCOUNT_PROD }}
+          npm install -g aws-cdk@2.54.0
+          export IS_DR="true"
+          cp cdk-prod.json cdk.json 2>/dev/null || :
+          $HOME/.local/bin/poetry run cdk deploy --all --require-approval never
+          sed -i -e 's/540187191005/868523441767/g' pyproject.toml
+
+      - name: Log deployment caller
+        if: github.event_name == 'repository_dispatch'
+        run: echo ${{ github.event.client_payload.message.caller }}
+
+  report-to-slack-on-failure:
+    runs-on: ubuntu-latest
+    needs: [cdk-deploy-prod-dr]
+    if: always() && needs.cdk-deploy-prod-dr.result == 'failure'
+    steps:
+      - name: report-to-slack
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"${{ github.repository}} - DR production deployment failed\nhttps://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"}' ${{ secrets.SLACK_WEBHOOK_FOR_FAILED_DR_DEPLOYMENTS }}
+

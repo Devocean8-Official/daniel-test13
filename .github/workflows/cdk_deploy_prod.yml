@@ -1,0 +1,115 @@
+
+name: CDK Deploy to prod
+
+on:
+  push:
+    branches: ['main']
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Log level'
+        required: true
+        default: 'warning'
+      packageVersion:
+        description: 'Service version to deploy'
+        required: true
+        default: 'latest'
+concurrency: prod_environment
+
+jobs:
+  cdk-deploy-prod:
+
+    runs-on: [self-hosted, prod]
+
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run flake8
+        run: |
+          pip install flake8
+          flake8
+
+      - name: CDK Deploy
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          AWS_DEFAULT_REGION: eu-central-1
+          AWS_ACCOUNT: ${{ secrets.AWS_ACCOUNT_PROD }}
+        run: |
+          export SSH_AUTH_SOCK=${{ env.SSH_AUTH_SOCK }}
+          export SSH_AGENT_PID=${{ env.SSH_AGENT_PID }}
+          export AWS_DEFAULT_REGION=eu-north-1
+          export AWS_CODEARTIFACT_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          export AWS_CODEARTIFACT_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws codeartifact login --tool pip --repository devocean-repo --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }}
+          export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }} --query authorizationToken --output text`
+          export AWS_DEFAULT_REGION=eu-north-1
+          
+          service_name=$(cat pyproject.toml| grep name | head -1 | cut -d '"' -f2 | tr _ -)
+          package_name=$(cat pyproject.toml| grep name | head -1 | cut -d '"' -f2 | tr - _)
+          version="${{ github.event.inputs.packageVersion }}"
+          if [[ "$version" == 'latest' ||  -z "$version" ]] ;
+          then
+            package_version=$(aws codeartifact list-package-versions --package $service_name --domain devocean-domain \
+            --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }} --repository devocean-repo --format pypi \
+            --sort-by PUBLISHED_TIME --output text --query 'versions[*].[version]' | head -1)
+          else
+            package_version='${{ github.event.inputs.packageVersion }}'
+          fi
+          echo $service_name $package_version
+          
+          echo "Creating deploy folder and downloading package assets"
+          mkdir -p deploy_folder
+          cd deploy_folder
+          aws codeartifact get-package-version-asset --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }} --repository devocean-repo \
+            --format pypi --package $service_name --package-version $package_version \
+            --asset $package_name-$package_version.tar.gz \
+            service_package.tar.gz
+          
+          echo "downloaded package assets, extracting into deploy folder"
+          tar -xzf service_package.tar.gz || true
+          cd $package_name-$package_version
+          cd $(cat pyproject.toml | grep include | head -1 | cut -d '"' -f2)
+          export AWS_DEFAULT_REGION=eu-central-1
+          npm install -g aws-cdk@2.54.0
+          export IS_DR="false"
+          
+          echo "Extract complete, deploying cloudformation"
+          cdk deploy --app './' --all --require-approval never --concurrency 20
+          
+          echo "Deploy complete, cleaning up deploy files..."
+          cd ../../../
+          rm -rf deploy_folder
+
+      - name: Log deployment caller
+        if: github.event_name == 'repository_dispatch'
+        run: echo ${{ github.event.client_payload.message.caller }}
+
+
+  report-to-slack-on-failure:
+    runs-on: ubuntu-latest
+    needs: [cdk-deploy-prod]
+    if: always() && needs.cdk-deploy-prod.result == 'failure'
+    steps:
+      - name: report-to-slack
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"${{ github.repository}} - production deployment failed\nhttps://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"}' ${{ secrets.SLACK_WEBHOOK_FOR_FAILED_DEPLOYMENTS }}
+  report-to-slack-on-success:
+    runs-on: ubuntu-latest
+    needs: [cdk-deploy-prod]
+    if: always() && needs.cdk-deploy-prod.result == 'success'
+    steps:
+      - name: report-to-slack
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"${{ github.repository}} - production deployment succeeded. Yay!\nhttps://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"}' ${{ secrets.SLACK_WEBHOOK_FOR_SUCCESSFUL_DEPLOYMENTS }}
+

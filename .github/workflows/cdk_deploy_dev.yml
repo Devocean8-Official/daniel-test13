@@ -1,0 +1,110 @@
+
+name: CDK Deploy to dev
+
+on:
+  push:
+    branches: ['dev']
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Log level'
+        required: true
+        default: 'warning'
+      tags:
+        description: 'Test scenario tags'
+
+concurrency: dev_environment
+
+jobs:
+  cdk-deploy-dev:
+
+    runs-on: [self-hosted, dev]
+
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run flake8
+        run: |
+          pip install flake8
+          flake8
+
+      - name: Update dependencies
+        env:
+          SUPER_SECRET: ${{ secrets.workflow_private_key }}
+        run: |
+          echo "adding authorized SSH key to enable cloning private repos"
+          echo "$SUPER_SECRET" > $HOME/test.key
+          chmod 600 $HOME/test.key
+          echo "https://unix.stackexchange.com/questions/351725/why-eval-the-output-of-ssh-agent"
+          eval `ssh-agent -s`
+          ssh-add $HOME/test.key
+
+      - name: Add SSH key for cloning private repos
+        env:
+          SUPER_SECRET: ${{ secrets.workflow_private_key }}
+        run: |
+          mkdir -p $HOME/.ssh
+          echo "$SUPER_SECRET" > $HOME/.ssh/id_rsa
+          chmod 600 $HOME/.ssh/id_rsa
+          eval `ssh-agent -s`
+          ssh-add $HOME/.ssh/id_rsa
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+
+      - name: CDK Deploy
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          AWS_DEFAULT_REGION: eu-central-1
+          AWS_ACCOUNT: ${{ secrets.AWS_ACCOUNT_DEV }}
+        run: |
+          export SSH_AUTH_SOCK=${{ env.SSH_AUTH_SOCK }}
+          export SSH_AGENT_PID=${{ env.SSH_AGENT_PID }}
+          export AWS_DEFAULT_REGION=eu-north-1
+          export AWS_CODEARTIFACT_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          export AWS_CODEARTIFACT_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          export AWS_CODEARTIFACT_ACCOUNT=${{ secrets.AWS_ACCOUNT_DEV }}
+          aws codeartifact login --tool pip --repository devocean-repo --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_DEV }}
+          export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_DEV }} --query authorizationToken --output text`
+          curl -sSL https://install.python-poetry.org | python -
+          $HOME/.local/bin/poetry config repositories.devocean-repo https://devocean-domain-${{ secrets.AWS_ACCOUNT_DEV }}.d.codeartifact.eu-north-1.amazonaws.com/pypi/devocean-repo/simple/
+          $HOME/.local/bin/poetry config http-basic.devocean-repo aws $CODEARTIFACT_AUTH_TOKEN
+          $HOME/.local/bin/poetry install
+          export AWS_DEFAULT_REGION=eu-central-1
+          npm install -g aws-cdk@2.54.0
+          export IS_DR="false"
+          cp cdk-dev.json cdk.json 2>/dev/null || :
+          $HOME/.local/bin/poetry run cdk deploy --all --require-approval never --concurrency 20
+
+      - name: Log deployment caller
+        if: github.event_name == 'repository_dispatch'
+        run: echo ${{ github.event.client_payload.message.caller }}
+
+  report-to-slack-on-failure:
+    runs-on: ubuntu-latest
+    needs: [cdk-deploy-dev]
+    if: always() && needs.cdk-deploy-dev.result == 'failure'
+    steps:
+      - name: report-to-slack
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"${{ github.repository}} - deployment failed\nhttps://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"}' ${{ secrets.SLACK_WEBHOOK_FOR_FAILED_DEPLOYMENTS }}
+
+  report-to-slack-on-success:
+    runs-on: ubuntu-latest
+    needs: [cdk-deploy-dev]
+    if: always() && needs.cdk-deploy-dev.result == 'success'
+    steps:
+      - name: report-to-slack
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"${{ github.repository}} - deployment succeeded. Yay!\nhttps://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"}' ${{ secrets.SLACK_WEBHOOK_FOR_SUCCESSFUL_DEPLOYMENTS }}
+

@@ -1,0 +1,98 @@
+
+name: Upload service to PROD CodeArtifact
+
+on:
+  push:
+    branches: ['dev']
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Log level'
+        required: true
+        default: 'warning'
+      tags:
+        description: 'Test scenario tags'
+
+concurrency: prod_upload_environment
+
+jobs:
+  upload-package-code-artifact:
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Add SSH key for cloning private repos
+        env:
+          SUPER_SECRET: ${{ secrets.workflow_private_key }}
+        run: |
+          mkdir -p $HOME/.ssh
+          echo "$SUPER_SECRET" > $HOME/.ssh/id_rsa
+          chmod 600 $HOME/.ssh/id_rsa
+          eval `ssh-agent -s`
+          ssh-add $HOME/.ssh/id_rsa
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+
+      - name: Upload packages to PROD CodeArtifact
+        env:
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          AWS_DEFAULT_REGION: eu-north-1
+          AWS_ACCOUNT: ${{ secrets.AWS_ACCOUNT_PROD }}
+        run: |
+          export SSH_AUTH_SOCK=${{ env.SSH_AUTH_SOCK }}
+          export SSH_AGENT_PID=${{ env.SSH_AGENT_PID }}
+          aws configure set default.region eu-north-1
+          aws codeartifact login --tool pip --repository devocean-repo --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }}
+          export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain devocean-domain --domain-owner ${{ secrets.AWS_ACCOUNT_PROD }} --query authorizationToken --output text`
+          curl -sSL https://install.python-poetry.org | python -
+          $HOME/.local/bin/poetry config repositories.devocean-repo https://devocean-domain-${{ secrets.AWS_ACCOUNT_PROD }}.d.codeartifact.eu-north-1.amazonaws.com/pypi/devocean-repo/
+          $HOME/.local/bin/poetry config http-basic.devocean-repo aws $CODEARTIFACT_AUTH_TOKEN
+          export AWS_CODEARTIFACT_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          export AWS_CODEARTIFACT_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          export AWS_CODEARTIFACT_ACCOUNT=${{ secrets.AWS_ACCOUNT_PROD }}
+          sed -i -e 's/868523441767/540187191005/g' pyproject.toml 
+          $HOME/.local/bin/poetry install
+          awk '!/Devocean8/' pyproject.toml > temp.txt && mv temp.txt pyproject.toml
+          npm install -g aws-cdk@2.54.0
+          export AWS_DEFAULT_REGION=eu-central-1
+          $HOME/.local/bin/poetry run cdk synth
+          aws configure set region eu-north-1
+          for app in $(cat pyproject.toml | grep include | grep -ve "*" | cut -d '"' -f2)
+          do
+            rm -rf ./$app
+            cp -r cdk.out $app
+            touch ./$app/__init__.py
+          done
+          $HOME/.local/bin/poetry build
+          $HOME/.local/bin/poetry publish -r devocean-repo
+
+  report-to-slack-on-failure:
+    runs-on: ubuntu-latest
+    needs: [ upload-package-code-artifact ]
+    if: always() && needs.upload-package-code-artifact.result == 'failure'
+    steps:
+      - name: report-to-slack
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"${{ github.repository}} - AWS artifact upload failed\nhttps://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"}' ${{ secrets.SLACK_WEBHOOK_FOR_FAILED_ARTIFACT_UPLOAD }}
+  report-to-slack-on-success:
+    runs-on: ubuntu-latest
+    needs: [ upload-package-code-artifact ]
+    if: always() && needs.upload-package-code-artifact.result == 'success'
+    steps:
+      - name: report-to-slack
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"${{ github.repository}} - AWS artifact upload to PROD succeeded. Yay!\nhttps://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"}' ${{ secrets.SLACK_WEBHOOK_FOR_SUCCESSFUL_ARTIFACT_UPLOAD }}
+

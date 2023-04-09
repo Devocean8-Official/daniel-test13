@@ -1,0 +1,11 @@
+{
+    "_output_dir": "/tmp/devocean",
+    "_template": "/home/runner/work/dev-repositories-management/dev-repositories-management/templates",
+    "include_github_actions": "yes",
+    "project_slug": "daniel_test13",
+    "repo_description": "",
+    "repo_language": "",
+    "repo_name": "daniel-test13",
+    "repo_type": "service",
+    "team_id": "devocean-infra"
+}

@@ -1,0 +1,87 @@
+
+name: Update Template code
+
+on:
+  workflow_dispatch:
+    inputs:
+      RepoType:
+        description: 'Repository Type'
+        required: true
+        default: 'service'
+
+jobs:
+  update_template_code:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    env:
+      REPO_TYPE: ${{ github.event.inputs.RepoType }}
+      GH_TOKEN: ${{ secrets.TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Extract github organization/OWNER
+        id: extract-owner
+        uses: actions/github-script@v4.1.0
+        env:
+          FULL_REPOSITORY: ${{ github.repository }}
+        with:
+          result-encoding: string
+          script: |
+            const { FULL_REPOSITORY } = process.env
+            const owner = FULL_REPOSITORY.split('/')[0]
+            return owner
+
+      - name: Extract github repository name
+        id: extract-repo-name
+        uses: actions/github-script@v4.1.0
+        env:
+          FULL_REPOSITORY: ${{ github.repository }}
+        with:
+          result-encoding: string
+          script: |
+            const { FULL_REPOSITORY } = process.env
+            const repo = FULL_REPOSITORY.split('/')[1]
+            return repo
+
+      - name: Install Cookiecutter
+        run: |
+          pip install cookiecutter
+
+      - name: Install Cruft
+        run: |
+          pip install cruft
+
+      - name: Add SSH for Github
+        env:
+          SUPER_SECRET: ${{ secrets.SSH_KEY_FOR_GITHUB }}
+        run: |
+          echo "adding authorized SSH key to enable cloning private repos"
+          mkdir -p $HOME/.ssh
+          echo "$SUPER_SECRET" > $HOME/.ssh/id_rsa
+          chmod 600 $HOME/.ssh/id_rsa
+          echo "https://unix.stackexchange.com/questions/351725/why-eval-the-output-of-ssh-agent"
+          eval `ssh-agent -s`
+          ssh-add $HOME/.ssh/id_rsa
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+
+      - name: Update Code
+        run: |
+          REPO_NAME=${{steps.extract-repo.outputs.result}} REPO_TYPE=${{github.event.inputs.RepoType}} GITHUB_ORG=${{steps.extract-owner.outputs.result}} ./devops/utils.sh update_template_code
+
+      - name: Failed !!!
+        if: ${{ failure() }}
+        run: exit
+
+      - name: sucessssss.
+        if: ${{ success() }}
+        run: echo "success"

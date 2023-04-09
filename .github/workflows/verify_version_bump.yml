@@ -1,0 +1,51 @@
+
+name: Check version bump
+
+on:
+  push:
+    branches:
+      - '*'         # matches every branch that doesn't contain a '/'
+      - '*/*'       # matches every branch containing a single '/'
+      - '**'        # matches every branch
+      - '!dev'   # excludes master
+
+
+
+jobs:
+  version_bump_test:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compare versions
+        run: |
+          pwd
+          git fetch > /dev/null 2>&1
+          cp pyproject.toml current_toml
+          current_branch=$(git status | grep "On branch" | cut -d " " -f 3)
+          if [ "$current_branch" = "dev" ]
+          then
+            git checkout main
+          else
+            git checkout dev
+          fi
+          if (diff current_toml pyproject.toml | grep version)
+          then
+            echo "Version was bumped, Cheers"
+            exit 0
+          else
+            echo "#################################################################################"
+            echo "( .)_( .) Version was not bumped, please check your pyproject.toml file (. )_(. )"
+            echo "#################################################################################"
+            exit 1
+          fi
+

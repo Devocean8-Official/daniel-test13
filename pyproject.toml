@@ -1,0 +1,38 @@
+[tool.poetry]
+name = "daniel-test13"
+version = "0.1.0"
+description = ""
+authors = ["y"]
+readme = "README.md"
+packages = [
+  {include = "daniel_test13"},
+]
+include = ["**/*.so", "**/*.typed"]
+
+[tool.poetry.dependencies]
+python = "~3.9"
+pydantic = "^1.8.2"
+shared = "~0.106.0"
+
+[tool.poetry.dev-dependencies]
+aws-cdk-lib = "^2.25.0"
+cdk-shared = "~1.12.10"
+
+[[tool.poetry.source]]
+name = "devocean-repo"
+url = "https://devocean-domain-868523441767.d.codeartifact.eu-north-1.amazonaws.com/pypi/devocean-repo/simple/"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.cruft]
+skip = [
+    "cruft/__init__.py",
+    "tests",
+    "template_input.json",
+    "README.md",
+    "app.py",
+    "pyproject.toml",
+    "setup.py",
+]

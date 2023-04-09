@@ -1,0 +1,52 @@
+
+name: Run Snyk
+
+on:
+  schedule:
+    - cron: '0 6 * * 0' # Every week on Sunday at 6:00
+
+concurrency: run-snyk
+
+jobs:
+  run-snyk:
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install poetry
+        if: steps.cache-python.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | python -
+
+      - name: Update dependencies
+        env:
+          SUPER_SECRET: ${{ secrets.workflow_private_key }}
+        run: |
+          echo "adding authorized SSH key to enable cloning private repos"
+          echo "$SUPER_SECRET" > $HOME/test.key
+          chmod 600 $HOME/test.key
+          echo "https://unix.stackexchange.com/questions/351725/why-eval-the-output-of-ssh-agent"
+          eval `ssh-agent -s`
+          ssh-add $HOME/test.key
+          source $HOME/.poetry/env
+          poetry update
+
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/python-3.8@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: monitor
+

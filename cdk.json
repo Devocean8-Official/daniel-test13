@@ -1,0 +1,6 @@
+{
+  "app": "sh cdk_hooks.sh pre && python app.py && sh cdk_hooks.sh post",
+  "context": {
+    "repo-name": "daniel-test13"
+  }
+}

@@ -1,0 +1,64 @@
+
+name: Run python unit tests
+
+on:
+  push:
+    branches:
+      - '*'         # matches every branch that doesn't contain a '/'
+      - '*/*'       # matches every branch containing a single '/'
+      - '**'        # matches every branch
+      - '!main'   # excludes master
+
+concurrency: run-python-unit-tests
+
+jobs:
+  run-python-unit-tests:
+
+    runs-on: [self-hosted, pytest]
+
+    strategy:
+      matrix:
+        python-version: [3.9]
+
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Update dependencies
+        env:
+          SUPER_SECRET: ${{ secrets.workflow_private_key }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          AWS_DEFAULT_REGION: eu-central-1
+        run: |
+          echo "adding authorized SSH key to enable cloning private repos"
+          echo "$SUPER_SECRET" > $HOME/test.key
+          chmod 600 $HOME/test.key
+          echo "https://unix.stackexchange.com/questions/351725/why-eval-the-output-of-ssh-agent"
+          eval `ssh-agent -s`
+          ssh-add $HOME/test.key
+          export AWS_DEFAULT_REGION=eu-north-1
+          aws codeartifact login --tool pip --repository devocean-repo --domain devocean-domain --domain-owner 868523441767
+          export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain devocean-domain --domain-owner 868523441767 --query authorizationToken --output text`
+          curl -sSL https://install.python-poetry.org | python -
+          $HOME/.local/bin/poetry config repositories.devocean-repo https://devocean-domain-868523441767.d.codeartifact.eu-north-1.amazonaws.com/pypi/devocean-repo/simple/
+          $HOME/.local/bin/poetry config http-basic.devocean-repo aws $CODEARTIFACT_AUTH_TOKEN
+          $HOME/.local/bin/poetry add pytest
+          $HOME/.local/bin/poetry add pytest-custom_exit_code
+          $HOME/.local/bin/poetry update
+
+      - name: Run unit tests
+        env:
+          AWS_DEFAULT_REGION: us-west-2
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+          AWS_SECURITY_TOKEN: testing
+          AWS_SESSION_TOKEN: testing
+        run: |
+          $HOME/.local/bin/poetry run pytest --suppress-no-test-exit-code -vvv
+
